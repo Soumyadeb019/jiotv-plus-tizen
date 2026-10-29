@@ -20,17 +20,53 @@ let langIdx = 0;
 let numBuffer = '';
 let numTimer = null;
 
+// function init() {
+//   fetch(API_BASE + '/channels')
+//     .then(function(r) { return r.json(); })
+//     .then(function(data) {
+//       allChannels = data.result || [];
+//       filteredChannels = allChannels.slice(0, 300);
+//       renderGrid();
+//     })
+//     .catch(function(err) {
+//       document.getElementById('grid').innerHTML = '<h2>Connecting to local Node.js service...</h2>';
+//       setTimeout(init, 2000);
+//     });
+// }
+
 function init() {
+  var grid = document.getElementById('grid');
+  grid.innerHTML = '<h2>Connecting to local Node.js service on 127.0.0.1:4567...</h2>';
+
   fetch(API_BASE + '/channels')
-    .then(function(r) { return r.json(); })
+    .then(function(r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    })
     .then(function(data) {
       allChannels = data.result || [];
       filteredChannels = allChannels.slice(0, 300);
       renderGrid();
     })
     .catch(function(err) {
-      document.getElementById('grid').innerHTML = '<h2>Connecting to local Node.js service...</h2>';
-      setTimeout(init, 2000);
+      // Show exact error on TV screen + try direct catalog fetch as fallback
+      grid.innerHTML =
+        '<div style="grid-column: 1 / -1; background:#1e293b; padding:20px; border-radius:8px;">' +
+        '<h3 style="color:#f87171; margin-bottom:8px;">Local Service Status: ' + err.message + '</h3>' +
+        '<p style="color:#94a3b8; font-size:15px;">Origin: ' + window.location.protocol + '//' + window.location.host + ' | Trying direct catalog fallback...</p>' +
+        '</div>';
+
+      // Fallback: Fetch public channel list directly if CORS permits
+      fetch('https://jiotvapi.cdn.jio.com/apis/v3.0/getMobileChannelList/get/?langId=6&os=android&devicetype=phone&usertype=JIO&version=330')
+        .then(function(r2) { return r2.json(); })
+        .then(function(data2) {
+          allChannels = data2.result || [];
+          filteredChannels = allChannels.slice(0, 300);
+          renderGrid();
+        })
+        .catch(function() {
+          setTimeout(init, 3000);
+        });
     });
 }
 

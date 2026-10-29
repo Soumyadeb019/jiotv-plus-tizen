@@ -1,14 +1,14 @@
-const http = require('http');
-const https = require('https');
-const url = require('url');
-const fs = require('fs');
-const path = require('path');
+'use strict';
 
-const PORT = 4567;
-const AUTH_FILE = path.join(__dirname, 'jio_tokens.json');
+var http = require('http');
+var https = require('https');
+var url = require('url');
+var fs = require('fs');
 
-// Spoof headers expected by JioTV CDN and APIs
-const JIO_API_HEADERS = {
+var PORT = 4567;
+var AUTH_FILE = '/tmp/jio_tokens.json';
+
+var JIO_API_HEADERS = {
   'User-Agent': 'okhttp/4.9.3',
   'appkey': 'NzNiMDhlYzQyNjJm',
   'devicetype': 'phone',
@@ -17,43 +17,76 @@ const JIO_API_HEADERS = {
   'versionCode': '330'
 };
 
-const PLAYER_HEADERS = {
+var PLAYER_HEADERS = {
   'User-Agent': 'plaYtv/7.1.5 (Linux;Android 13) ExoPlayerLib/2.11.7'
 };
 
-let sessionCookies = {}; // Stores channel-specific __hdnea__ cookies
+var sessionCookies = {};
+var memoryAuth = null;
+
+// Safe Base64 helper for Node.js 4.4.3
+function toBase64(str) {
+  try {
+    return new Buffer(str).toString('base64');
+  } catch (e) {
+    return Buffer.from(str).toString('base64');
+  }
+}
 
 function loadAuth() {
+  if (memoryAuth) return memoryAuth;
   try {
     if (fs.existsSync(AUTH_FILE)) {
-      return JSON.parse(fs.readFileSync(AUTH_FILE, 'utf8'));
+      memoryAuth = JSON.parse(fs.readFileSync(AUTH_FILE, 'utf8'));
+      return memoryAuth;
     }
   } catch (e) {}
   return null;
 }
 
 function saveAuth(data) {
-  fs.writeFileSync(AUTH_FILE, JSON.stringify(data, null, 2), 'utf8');
+  memoryAuth = data;
+  try {
+    fs.writeFileSync(AUTH_FILE, JSON.stringify(data), 'utf8');
+  } catch (e) {}
 }
 
-// Helper for HTTPS requests
-function requestUrl(targetUrl, options = {}, postData = null) {
-  return new Promise((resolve, reject) => {
-    const parsed = url.parse(targetUrl);
-    const reqOpts = {
+function assignHeaders(base, extra) {
+  var out = {};
+  var k;
+  for (k in base) {
+    if (Object.prototype.hasOwnProperty.call(base, k)) out[k] = base[k];
+  }
+  if (extra) {
+    for (k in extra) {
+      if (Object.prototype.hasOwnProperty.call(extra, k)) out[k] = extra[k];
+    }
+  }
+  return out;
+}
+
+// Pure callback HTTPS/HTTP helper (No async/await or default params)
+function requestUrl(targetUrl, options, postData, callback) {
+  try {
+    var parsed = url.parse(targetUrl);
+    var isHttp = parsed.protocol === 'http:';
+    var reqOpts = {
       hostname: parsed.hostname,
-      port: parsed.port || 443,
+      port: parsed.port || (isHttp ? 80 : 443),
       path: parsed.path,
-      method: options.method || 'GET',
-      headers: options.headers || {}
+      method: (options && options.method) ? options.method : 'GET',
+      headers: (options && options.headers) ? options.headers : {},
+      rejectUnauthorized: false
     };
 
-    const proto = parsed.protocol === 'http:' ? http : https;
-    const req = proto.request(reqOpts, (res) => {
-      const chunks = [];
-      res.on('data', (chunk) => chunks.push(chunk));
-      res.on('end', () => {
-        resolve({
+    var proto = isHttp ? http : https;
+    var req = proto.request(reqOpts, function(res) {
+      var chunks = [];
+      res.on('data', function(chunk) {
+        chunks.push(chunk);
+      });
+      res.on('end', function() {
+        callback(null, {
           statusCode: res.statusCode,
           headers: res.headers,
           body: Buffer.concat(chunks)
@@ -61,71 +94,132 @@ function requestUrl(targetUrl, options = {}, postData = null) {
       });
     });
 
-    req.on('error', reject);
+    req.on('error', function(err) {
+      callback(err, null);
+    });
+
     if (postData) req.write(postData);
     req.end();
-  });
+  } catch (err) {
+    callback(err, null);
+  }
 }
 
-const server = http.createServer(async (req, res) => {
-  // Enable CORS for the Tizen Chromium frontend
+function rewriteManifest(manifestText, baseUrl, channelId) {
+  var lines = manifestText.split('\n');
+  var out = [];
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i];
+    var trimmed = line.trim();
+    if (!trimmed) {
+      out.push(line);
+      continue;
+    }
+
+    if (trimmed.indexOf('#EXT-X-KEY') === 0 && trimmed.indexOf('URI="') !== -1) {
+      out.push(trimmed.replace(/URI="([^"]+)"/, function(match, keyUri) {
+        var fullKeyUrl = keyUri.indexOf('http') === 0 ? keyUri : baseUrl + keyUri;
+        return 'URI="http://127.0.0.1:' + PORT + '/proxy?cid=' + channelId + '&url=' + encodeURIComponent(fullKeyUrl) + '"';
+      }));
+      continue;
+    }
+
+    if (trimmed.indexOf('#') === 0) {
+      out.push(line);
+      continue;
+    }
+
+    var fullTargetUrl = trimmed.indexOf('http') === 0 ? trimmed : baseUrl + trimmed;
+    out.push('http://127.0.0.1:' + PORT + '/proxy?cid=' + channelId + '&url=' + encodeURIComponent(fullTargetUrl));
+  }
+  return out.join('\n');
+}
+
+var server = http.createServer(function(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
-    return res.end();
+    res.end();
+    return;
   }
 
-  const parsedReq = url.parse(req.url, true);
-  const pathname = parsedReq.pathname;
+  var parsedReq = url.parse(req.url, true);
+  var pathname = parsedReq.pathname;
 
-  try {
-    // 1. Fetch Live Channel Catalog
-    if (pathname === '/channels') {
-      const catalogUrl = 'https://jiotvapi.cdn.jio.com/apis/v3.0/getMobileChannelList/get/?langId=6&os=android&devicetype=phone&usertype=JIO&version=330';
-      const response = await requestUrl(catalogUrl, { headers: JIO_API_HEADERS });
+  // 0. Health Check
+  if (pathname === '/ping') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: 'ok', node: process.version }));
+    return;
+  }
+
+  // 1. Fetch Live Channel Catalog
+  if (pathname === '/channels') {
+    var catalogUrl = 'https://jiotvapi.cdn.jio.com/apis/v3.0/getMobileChannelList/get/?langId=6&os=android&devicetype=phone&usertype=JIO&version=330';
+    requestUrl(catalogUrl, { headers: JIO_API_HEADERS }, null, function(err, response) {
+      if (err || !response) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: String(err) }));
+        return;
+      }
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(response.body);
-    }
+      res.end(response.body);
+    });
+    return;
+  }
 
-    // 2. Send OTP
-    if (pathname === '/login/send-otp' && req.method === 'POST') {
-      let body = '';
-      req.on('data', chunk => body += chunk);
-      req.on('end', async () => {
-        const { phone } = JSON.parse(body);
-        const b64Phone = Buffer.from('+91' + phone).toString('base64');
-        const payload = JSON.stringify({ number: b64Phone });
+  // 2. Send OTP
+  if (pathname === '/login/send-otp' && req.method === 'POST') {
+    var body1 = '';
+    req.on('data', function(chunk) { body1 += chunk; });
+    req.on('end', function() {
+      try {
+        var parsedBody = JSON.parse(body1);
+        var b64Phone = toBase64('+91' + parsedBody.phone);
+        var payload = JSON.stringify({ number: b64Phone });
 
-        const otpRes = await requestUrl(
+        requestUrl(
           'https://jiotvapi.media.jio.com/userservice/apis/v1/loginotp/send',
           {
             method: 'POST',
-            headers: Object.assign({}, JIO_API_HEADERS, {
+            headers: assignHeaders(JIO_API_HEADERS, {
               'Content-Type': 'application/json',
-              'Content-Length': Buffer.byteLength(payload)
+              'Content-Length': String( payload.length )
             })
           },
-          payload
+          payload,
+          function(err, otpRes) {
+            if (err || !otpRes) {
+              res.writeHead(500);
+              res.end(String(err));
+              return;
+            }
+            res.writeHead(otpRes.statusCode, { 'Content-Type': 'application/json' });
+            res.end(otpRes.body);
+          }
         );
-        res.writeHead(otpRes.statusCode, { 'Content-Type': 'application/json' });
-        res.end(otpRes.body);
-      });
-      return;
-    }
+      } catch (e) {
+        res.writeHead(400);
+        res.end(String(e));
+      }
+    });
+    return;
+  }
 
-    // 3. Verify OTP & Save Tokens
-    if (pathname === '/login/verify-otp' && req.method === 'POST') {
-      let body = '';
-      req.on('data', chunk => body += chunk);
-      req.on('end', async () => {
-        const { phone, otp } = JSON.parse(body);
-        const b64Phone = Buffer.from('+91' + phone).toString('base64');
-        const payload = JSON.stringify({
+  // 3. Verify OTP
+  if (pathname === '/login/verify-otp' && req.method === 'POST') {
+    var body2 = '';
+    req.on('data', function(chunk) { body2 += chunk; });
+    req.on('end', function() {
+      try {
+        var data = JSON.parse(body2);
+        var b64Phone = toBase64('+91' + data.phone);
+        var payload = JSON.stringify({
           number: b64Phone,
-          otp: otp,
+          otp: data.otp,
           deviceInfo: {
             consumptionDeviceName: 'SM-G998B',
             info: {
@@ -136,138 +230,154 @@ const server = http.createServer(async (req, res) => {
           }
         });
 
-        const verifyRes = await requestUrl(
+        requestUrl(
           'https://jiotvapi.media.jio.com/userservice/apis/v1/loginotp/verify',
           {
             method: 'POST',
-            headers: Object.assign({}, JIO_API_HEADERS, {
+            headers: assignHeaders(JIO_API_HEADERS, {
               'Content-Type': 'application/json',
-              'Content-Length': Buffer.byteLength(payload)
+              'Content-Length': String(payload.length)
             })
           },
-          payload
+          payload,
+          function(err, verifyRes) {
+            if (err || !verifyRes) {
+              res.writeHead(500);
+              res.end(String(err));
+              return;
+            }
+            if (verifyRes.statusCode === 200) {
+              try {
+                saveAuth(JSON.parse(verifyRes.body.toString()));
+              } catch (e) {}
+            }
+            res.writeHead(verifyRes.statusCode, { 'Content-Type': 'application/json' });
+            res.end(verifyRes.body);
+          }
         );
+      } catch (e) {
+        res.writeHead(400);
+        res.end(String(e));
+      }
+    });
+    return;
+  }
 
-        if (verifyRes.statusCode === 200) {
-          saveAuth(JSON.parse(verifyRes.body.toString()));
-        }
-        res.writeHead(verifyRes.statusCode, { 'Content-Type': 'application/json' });
-        res.end(verifyRes.body);
-      });
+  // 4. Master HLS Stream (/live.m3u8?id=144)
+  if (pathname === '/live.m3u8') {
+    var channelId = parsedReq.query.id;
+    var auth = loadAuth();
+    if (!auth || !auth.authToken) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Not logged in. Press RED button to login.' }));
       return;
     }
 
-    // 4. Master HLS Stream Endpoint (/live?id=144)
-    if (pathname === '/live.m3u8') {
-      const channelId = parsedReq.query.id;
-      const auth = loadAuth();
-      if (!auth || !auth.authToken) {
-        res.writeHead(401, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: 'Not logged in' }));
+    var postForm = 'stream_type=Seek&channel_id=' + channelId;
+    var playbackHeaders = assignHeaders(JIO_API_HEADERS, {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'accesstoken': auth.authToken,
+      'ssotoken': auth.ssoToken || '',
+      'crmid': auth.sessionAttributes.user.subscriberId,
+      'uniqueId': auth.sessionAttributes.user.unique,
+      'userId': auth.sessionAttributes.user.uid,
+      'deviceId': 'tizenbrew_jiotv_device_01'
+    });
+
+    requestUrl(
+      'https://jiotvapi.media.jio.com/playback/apis/v1/geturl?langId=6',
+      { method: 'POST', headers: playbackHeaders },
+      postForm,
+      function(err, pbRes) {
+        if (err || !pbRes) {
+          res.writeHead(502);
+          res.end(String(err));
+          return;
+        }
+        try {
+          var pbData = JSON.parse(pbRes.body.toString());
+          if (!pbData.result) {
+            res.writeHead(502);
+            res.end('No stream URL returned');
+            return;
+          }
+
+          var streamUrl = pbData.result;
+          var hdneaMatch = streamUrl.match(/(__hdnea__=[^&]+)/);
+          if (hdneaMatch) {
+            sessionCookies[channelId] = hdneaMatch[1];
+          }
+
+          requestUrl(
+            streamUrl,
+            {
+              headers: assignHeaders(PLAYER_HEADERS, {
+                'Cookie': sessionCookies[channelId] || ''
+              })
+            },
+            null,
+            function(err2, m3u8Res) {
+              if (err2 || !m3u8Res) {
+                res.writeHead(502);
+                res.end(String(err2));
+                return;
+              }
+              if (m3u8Res.headers['set-cookie']) {
+                sessionCookies[channelId] = m3u8Res.headers['set-cookie'][0].split(';')[0];
+              }
+              var baseUrl = streamUrl.substring(0, streamUrl.lastIndexOf('/') + 1);
+              var rewritten = rewriteManifest(m3u8Res.body.toString(), baseUrl, channelId);
+              res.writeHead(200, { 'Content-Type': 'application/vnd.apple.mpegurl' });
+              res.end(rewritten);
+            }
+          );
+        } catch (e) {
+          res.writeHead(500);
+          res.end(String(e));
+        }
       }
+    );
+    return;
+  }
 
-      const postForm = `stream_type=Seek&channel_id=${channelId}`;
-      const playbackHeaders = Object.assign({}, JIO_API_HEADERS, {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'accesstoken': auth.authToken,
-        'ssotoken': auth.ssoToken || '',
-        'crmid': auth.sessionAttributes.user.subscriberId,
-        'uniqueId': auth.sessionAttributes.user.unique,
-        'userId': auth.sessionAttributes.user.uid,
-        'deviceId': 'tizenbrew_jiotv_device_01'
-      });
+  // 5. Proxy child .m3u8, .ts segments, and .key files
+  if (pathname === '/proxy') {
+    var target = parsedReq.query.url;
+    var cid = parsedReq.query.cid;
+    var cookie = sessionCookies[cid] || '';
 
-      const pbRes = await requestUrl(
-        'https://jiotvapi.media.jio.com/playback/apis/v1/geturl?langId=6',
-        { method: 'POST', headers: playbackHeaders },
-        postForm
-      );
-
-      const pbData = JSON.parse(pbRes.body.toString());
-      if (!pbData.result) {
-        res.writeHead(502);
-        return res.end('Failed to obtain stream URL');
-      }
-
-      const streamUrl = pbData.result;
-      const hdneaMatch = streamUrl.match(/(__hdnea__=[^&]+)/);
-      if (hdneaMatch) {
-        sessionCookies[channelId] = hdneaMatch[1];
-      }
-
-      // Fetch the initial M3U8 manifest
-      const m3u8Res = await requestUrl(streamUrl, {
-        headers: Object.assign({}, PLAYER_HEADERS, {
-          'Cookie': sessionCookies[channelId] || ''
-        })
-      });
-
-      if (m3u8Res.headers['set-cookie']) {
-        sessionCookies[channelId] = m3u8Res.headers['set-cookie'][0].split(';')[0];
-      }
-
-      const baseUrl = streamUrl.substring(0, streamUrl.lastIndexOf('/') + 1);
-      const rewrittenM3u8 = rewriteManifest(m3u8Res.body.toString(), baseUrl, channelId);
-
-      res.writeHead(200, { 'Content-Type': 'application/vnd.apple.mpegurl' });
-      return res.end(rewrittenM3u8);
-    }
-
-    // 5. Segment (.ts), Variant (.m3u8), and AES Key (.key) Proxy
-    if (pathname === '/proxy') {
-      const target = parsedReq.query.url;
-      const channelId = parsedReq.query.cid;
-      const cookie = sessionCookies[channelId] || '';
-
-      const proxyRes = await requestUrl(target, {
-        headers: Object.assign({}, PLAYER_HEADERS, {
+    requestUrl(
+      target,
+      {
+        headers: assignHeaders(PLAYER_HEADERS, {
           'Cookie': cookie
         })
-      });
-
-      if (target.includes('.m3u8')) {
-        const baseUrl = target.substring(0, target.lastIndexOf('/') + 1);
-        const rewritten = rewriteManifest(proxyRes.body.toString(), baseUrl, channelId);
-        res.writeHead(200, { 'Content-Type': 'application/vnd.apple.mpegurl' });
-        return res.end(rewritten);
+      },
+      null,
+      function(err, proxyRes) {
+        if (err || !proxyRes) {
+          res.writeHead(502);
+          res.end(String(err));
+          return;
+        }
+        if (target.indexOf('.m3u8') !== -1) {
+          var baseUrl = target.substring(0, target.lastIndexOf('/') + 1);
+          var rewritten = rewriteManifest(proxyRes.body.toString(), baseUrl, cid);
+          res.writeHead(200, { 'Content-Type': 'application/vnd.apple.mpegurl' });
+          res.end(rewritten);
+          return;
+        }
+        res.writeHead(proxyRes.statusCode, {
+          'Content-Type': proxyRes.headers['content-type'] || 'video/MP2T'
+        });
+        res.end(proxyRes.body);
       }
-
-      res.writeHead(proxyRes.statusCode, {
-        'Content-Type': proxyRes.headers['content-type'] || 'video/MP2T'
-      });
-      return res.end(proxyRes.body);
-    }
-
-    res.writeHead(404);
-    res.end('Not Found');
-  } catch (err) {
-    res.writeHead(500);
-    res.end(err.toString());
+    );
+    return;
   }
+
+  res.writeHead(404);
+  res.end('Not Found');
 });
 
-// Rewrites relative .m3u8, .ts, and AES-128 URI="..." links to point to local proxy
-function rewriteManifest(manifestText, baseUrl, channelId) {
-  return manifestText.split('\n').map(line => {
-    const trimmed = line.trim();
-    if (!trimmed) return line;
-
-    // Rewrite AES-128 Key URI inside #EXT-X-KEY
-    if (trimmed.startsWith('#EXT-X-KEY') && trimmed.includes('URI="')) {
-      return trimmed.replace(/URI="([^"]+)"/, (match, keyUri) => {
-        const fullKeyUrl = keyUri.startsWith('http') ? keyUri : baseUrl + keyUri;
-        return `URI="http://127.0.0.1:${PORT}/proxy?cid=${channelId}&url=${encodeURIComponent(fullKeyUrl)}"`;
-      });
-    }
-
-    if (trimmed.startsWith('#')) return line;
-
-    // Rewrite child .m3u8 or .ts segment lines
-    const fullTargetUrl = trimmed.startsWith('http') ? trimmed : baseUrl + trimmed;
-    return `http://127.0.0.1:${PORT}/proxy?cid=${channelId}&url=${encodeURIComponent(fullTargetUrl)}`;
-  }).join('\n');
-}
-
-server.listen(PORT, '127.0.0.1', () => {
-  console.log(`JioTV+ TizenBrew Proxy running on http://127.0.0.1:${PORT}`);
-});
+server.listen(PORT, '127.0.0.1');
