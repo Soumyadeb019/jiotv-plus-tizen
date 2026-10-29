@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>JioTV+ Tizen</title>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.4.12/dist/hls.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
+    body {
+      background-color: #0b0e14;
+      color: #ffffff;
+      font-family: sans-serif;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+    }
+    /* Top Header & Category Bar */
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 24px 40px;
+      background: #131822;
+      border-bottom: 2px solid #1f2937;
+    }
+    .brand { font-size: 28px; font-weight: bold; color: #e11d48; }
+    .legend span {
+      margin-left: 20px;
+      font-size: 16px;
+      color: #9ca3af;
+    }
+    .dot {
+      display: inline-block;
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      margin-right: 6px;
+    }
+    /* Channel Grid */
+    .grid-container {
+      padding: 30px 40px;
+      height: calc(100vh - 90px);
+      overflow-y: hidden;
+    }
+    .channel-grid {
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      grid-gap: 20px;
+    }
+    .card {
+      background: #1a2130;
+      border: 3px solid transparent;
+      border-radius: 10px;
+      padding: 18px;
+      text-align: center;
+      transition: transform 0.15s ease;
+    }
+    .card.focused {
+      border-color: #38bdf8;
+      background: #232d42;
+      transform: scale(1.06);
+      box-shadow: 0 0 20px rgba(56, 189, 248, 0.4);
+    }
+    .card img {
+      width: 90px;
+      height: 90px;
+      object-fit: contain;
+      margin-bottom: 10px;
+    }
+    .card-title {
+      font-size: 16px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .card-num {
+      font-size: 13px;
+      color: #38bdf8;
+      margin-bottom: 4px;
+    }
+    /* Fullscreen Video Overlay */
+    #player-overlay {
+      display: none;
+      position: fixed;
+      top: 0; left: 0;
+      width: 100vw; height: 100vh;
+      background: #000;
+      z-index: 100;
+    }
+    video { width: 100%; height: 100%; }
+    #osd-banner {
+      position: fixed;
+      bottom: 40px; left: 40px; right: 40px;
+      background: rgba(19, 24, 34, 0.92);
+      border-left: 6px solid #e11d48;
+      padding: 20px 30px;
+      border-radius: 8px;
+      font-size: 24px;
+      z-index: 110;
+      display: none;
+    }
+    #num-osd {
+      position: fixed;
+      top: 40px; right: 50px;
+      background: rgba(225, 29, 72, 0.9);
+      padding: 12px 24px;
+      font-size: 32px;
+      font-weight: bold;
+      border-radius: 8px;
+      z-index: 120;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="header">
+    <div class="brand">JioTV+ <span id="filter-label" style="font-size:18px; color:#38bdf8; margin-left:12px;">All Channels</span></div>
+    <div class="legend">
+      <span><i class="dot" style="background:#ef4444;"></i>Red: Login</span>
+      <span><i class="dot" style="background:#22c55e;"></i>Green: Language</span>
+      <span><i class="dot" style="background:#eab308;"></i>Yellow: Category</span>
+      <span>Ch ▲/▼: Surf</span>
+    </div>
+  </div>
+
+  <div class="grid-container" id="scroll-box">
+    <div class="channel-grid" id="grid"></div>
+  </div>
+
+  <div id="player-overlay">
+    <video id="tv-video" autoplay></video>
+    <div id="osd-banner"></div>
+  </div>
+
+  <div id="num-osd"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

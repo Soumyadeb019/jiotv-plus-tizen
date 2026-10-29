@@ -1,0 +1,24 @@
+{
+  "name": "jiotv-plus-tizen",
+  "version": "1.0.0",
+  "description": "Standalone JioTV Plus client with built-in Node.js HLS proxy",
+  "packageType": "app",
+  "appName": "JioTV+ Tizen",
+  "appPath": "app/index.html",
+  "serviceFile": "service.js",
+  "keys": [
+    "MediaPlay",
+    "MediaPause",
+    "MediaPlayPause",
+    "MediaStop",
+    "MediaFastForward",
+    "MediaRewind",
+    "ChannelUp",
+    "ChannelDown",
+    "ColorF0Red",
+    "ColorF1Green",
+    "ColorF2Yellow",
+    "ColorF3Blue",
+    "0", "1", "2", "3", "4", "5", "6", "7", "8", "9"
+  ]
+}
